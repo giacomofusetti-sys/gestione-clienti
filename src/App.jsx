@@ -43,9 +43,6 @@ const FALLBACK_CALENDAR_EVENTS = [
 ];
 
 // ─── GOOGLE CALENDAR INTEGRATION ───
-const GCAL_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
-const GCAL_SCOPES = "https://www.googleapis.com/auth/calendar.readonly";
-
 function classifyEventType(summary) {
   const s = summary.toLowerCase();
   if (/consegn/i.test(s)) return "consegna";
@@ -55,7 +52,6 @@ function classifyEventType(summary) {
 
 function generateMatchKeys(summary, description) {
   const text = `${summary} ${description || ""}`.toLowerCase();
-  // Remove common Italian words and short words, keep meaningful keywords
   const stopWords = new Set(["per","con","del","della","delle","dei","degli","dal","dalla","che","non","una","uno","gli","nel","nella","alle","alla","fissare","appuntamento","visita","chiamare","consegna","incontro","analisi","nuovo","nuova","riunione","meeting","evento"]);
   const words = text
     .replace(/[^a-zàèéìòù\s]/g, " ")
@@ -87,65 +83,32 @@ function parseGoogleEvent(gEvent) {
   };
 }
 
-let gapiInited = false;
-let gisInited = false;
-let tokenClient = null;
-
-function initGapi() {
-  return new Promise((resolve, reject) => {
-    if (gapiInited) return resolve();
-    if (!window.gapi) return reject(new Error("Google API non caricata"));
-    window.gapi.load("client", async () => {
-      try {
-        await window.gapi.client.init({});
-        await window.gapi.client.load("https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest");
-        gapiInited = true;
-        resolve();
-      } catch (e) { reject(e); }
-    });
-  });
-}
-
-function initGis() {
-  return new Promise((resolve, reject) => {
-    if (gisInited) return resolve(tokenClient);
-    if (!window.google?.accounts?.oauth2) return reject(new Error("Google Identity Services non caricato"));
-    tokenClient = window.google.accounts.oauth2.initTokenClient({
-      client_id: GCAL_CLIENT_ID,
-      scope: GCAL_SCOPES,
-      callback: () => {},
-    });
-    gisInited = true;
-    resolve(tokenClient);
-  });
-}
-
-function requestGoogleToken(tc) {
-  return new Promise((resolve, reject) => {
-    tc.callback = (resp) => {
-      if (resp.error) return reject(new Error(resp.error));
-      resolve(resp);
-    };
-    tc.error_callback = (err) => reject(err);
-    if (window.gapi.client.getToken() === null) {
-      tc.requestAccessToken({ prompt: "consent" });
-    } else {
-      tc.requestAccessToken({ prompt: "" });
-    }
-  });
-}
-
-async function fetchGoogleCalendarEvents(timeMin, timeMax) {
-  const resp = await window.gapi.client.calendar.events.list({
-    calendarId: "primary",
+async function fetchGoogleCalendarEvents(accessToken, timeMin, timeMax) {
+  const params = new URLSearchParams({
     timeMin: new Date(timeMin).toISOString(),
     timeMax: new Date(timeMax).toISOString(),
-    showDeleted: false,
-    singleEvents: true,
-    maxResults: 250,
-    orderBy: "startTime",
+    maxResults: "250",
   });
-  return (resp.result.items || []).map(parseGoogleEvent);
+  const resp = await fetch(`/api/gcal/events?${params.toString()}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!resp.ok) {
+    if (resp.status === 401) throw new Error("TOKEN_EXPIRED");
+    throw new Error("Errore nel caricamento eventi");
+  }
+  const data = await resp.json();
+  return (data.items || []).map(parseGoogleEvent);
+}
+
+async function refreshGcalToken(refreshToken) {
+  const resp = await fetch("/api/gcal/refresh", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+  if (!resp.ok) throw new Error("Impossibile rinnovare il token");
+  const data = await resp.json();
+  return data.access_token;
 }
 
 // ─── CLIENT DATA ───
@@ -205,7 +168,7 @@ const TYPE_COLORS = { visita:"#6366F1", chiamata:"#3B82F6", consegna:"#10B981" }
 const TYPE_LABELS = { visita:"Visita", chiamata:"Chiamata", consegna:"Consegna" };
 const fmtC = (v) => new Intl.NumberFormat("it-IT",{style:"currency",currency:"EUR",maximumFractionDigits:0}).format(v);
 const fmtD = (d) => d ? new Date(d).toLocaleDateString("it-IT",{day:"numeric",month:"short"}) : "—";
-const TODAY = "2026-03-12";
+const TODAY = new Date().toISOString().split('T')[0];
 const daysDiff = (a,b) => Math.round((new Date(b)-new Date(a))/86400000);
 
 // ─── VISIT FREQUENCY BY SCORE ───
@@ -506,17 +469,10 @@ function DTag({d}) { return d===0?<span className="tag tag-muted">—</span>:d>0
 async function organizeNotesWithAI(rawNotes, clientName, eventSummary, eventDate) {
   console.log("[AI] Avvio organizzazione note per:", clientName, "-", eventSummary);
   try {
-    const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY || "";
-    if (!apiKey) {
-      console.warn("[AI] Attenzione: VITE_ANTHROPIC_API_KEY non impostata in .env");
-    }
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
+    const response = await fetch("/api/claude", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true",
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-6",
@@ -578,12 +534,7 @@ function VisitNoteEditor({ eventId, clientName, eventSummary, eventDate, existin
       setAiError(null);
       onSave(eventId, raw, result);
     } else {
-      const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY;
-      if (!apiKey) {
-        setAiError("Chiave API mancante. Aggiungi VITE_ANTHROPIC_API_KEY nel file .env e riavvia il server.");
-      } else {
-        setAiError("Errore nella chiamata AI. Controlla la console del browser per dettagli.");
-      }
+      setAiError("Errore nella chiamata AI. Controlla la console del browser per dettagli.");
     }
   };
 
@@ -667,14 +618,10 @@ function parseEmailJson(text) {
 
 async function analyzeEmailsWithAI(rawText, clientNames) {
   try {
-    const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY || "";
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
+    const response = await fetch("/api/claude", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true",
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
@@ -745,8 +692,7 @@ function EmailAnalyzer({ clients, emailAnalysis, onNewAnalysis, onOpenClient }) 
       setRawText("");
       setShowRaw(false);
     } else {
-      const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY;
-      setError(apiKey ? "Errore nell'analisi AI. Controlla la console." : "Chiave API mancante. Aggiungi VITE_ANTHROPIC_API_KEY nel file .env");
+      setError("Errore nell'analisi AI. Controlla la console.");
     }
   };
 
@@ -987,52 +933,82 @@ export default function CRMApp() {
   const [gcalEvents,setGcalEvents]=useState(()=>{
     try { const s=localStorage.getItem("crm_gcalEvents"); return s?JSON.parse(s):null; } catch { return null; }
   });
-  const [gcalConnected,setGcalConnected]=useState(false);
+  const [gcalToken,setGcalToken]=useState(()=>localStorage.getItem("crm_gcalToken")||null);
+  const [gcalRefresh,setGcalRefresh]=useState(()=>localStorage.getItem("crm_gcalRefresh")||null);
+  const [gcalConnected,setGcalConnected]=useState(()=>!!localStorage.getItem("crm_gcalToken"));
   const [gcalLoading,setGcalLoading]=useState(false);
   const [gcalError,setGcalError]=useState(null);
 
   // Active calendar events: Google Calendar if connected, otherwise fallback
   const calendarEvents = gcalEvents || FALLBACK_CALENDAR_EVENTS;
 
+  // Check URL for OAuth callback tokens on mount
+  useEffect(()=>{
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("gcal_token");
+    const refresh = params.get("gcal_refresh");
+    if (token) {
+      setGcalToken(token);
+      localStorage.setItem("crm_gcalToken", token);
+      setGcalConnected(true);
+      if (refresh) {
+        setGcalRefresh(refresh);
+        localStorage.setItem("crm_gcalRefresh", refresh);
+      }
+      // Clean URL
+      window.history.replaceState({}, document.title, window.location.pathname);
+      // Fetch events with the new token
+      const now = new Date();
+      const from = new Date(now.getFullYear(), now.getMonth()-3, 1).toISOString().slice(0,10);
+      const to = new Date(now.getFullYear(), now.getMonth()+4, 0).toISOString().slice(0,10);
+      fetchGoogleCalendarEvents(token, from, to)
+        .then(events => setGcalEvents(events))
+        .catch(e => setGcalError(e.message));
+    }
+  },[]);
+
   useEffect(()=>{
     if(gcalEvents) try { localStorage.setItem("crm_gcalEvents",JSON.stringify(gcalEvents)); } catch {}
   },[gcalEvents]);
 
-  const connectGoogleCalendar = async () => {
-    if(!GCAL_CLIENT_ID){setGcalError("Aggiungi VITE_GOOGLE_CLIENT_ID nel file .env");return;}
-    setGcalLoading(true); setGcalError(null);
+  const connectGoogleCalendar = () => {
+    window.location.href = "/api/gcal/auth";
+  };
+
+  const fetchWithRefresh = async (token, from, to) => {
     try {
-      await initGapi();
-      const tc = await initGis();
-      await requestGoogleToken(tc);
-      setGcalConnected(true);
-      // Fetch 6 months of events (3 past + 3 future)
-      const now = new Date();
-      const from = new Date(now.getFullYear(), now.getMonth()-3, 1).toISOString().slice(0,10);
-      const to = new Date(now.getFullYear(), now.getMonth()+4, 0).toISOString().slice(0,10);
-      const events = await fetchGoogleCalendarEvents(from, to);
-      setGcalEvents(events);
-    } catch(e) { setGcalError(e.message||"Errore connessione Google Calendar"); }
-    finally { setGcalLoading(false); }
+      return await fetchGoogleCalendarEvents(token, from, to);
+    } catch (e) {
+      if (e.message === "TOKEN_EXPIRED" && gcalRefresh) {
+        const newToken = await refreshGcalToken(gcalRefresh);
+        setGcalToken(newToken);
+        localStorage.setItem("crm_gcalToken", newToken);
+        return await fetchGoogleCalendarEvents(newToken, from, to);
+      }
+      throw e;
+    }
   };
 
   const syncGoogleCalendar = async () => {
+    if (!gcalToken) { setGcalError("Token mancante, riconnetti Google Calendar"); return; }
     setGcalLoading(true); setGcalError(null);
     try {
       const now = new Date();
       const from = new Date(now.getFullYear(), now.getMonth()-3, 1).toISOString().slice(0,10);
       const to = new Date(now.getFullYear(), now.getMonth()+4, 0).toISOString().slice(0,10);
-      const events = await fetchGoogleCalendarEvents(from, to);
+      const events = await fetchWithRefresh(gcalToken, from, to);
       setGcalEvents(events);
     } catch(e) { setGcalError(e.message||"Errore sincronizzazione"); }
     finally { setGcalLoading(false); }
   };
 
   const disconnectGoogleCalendar = () => {
-    const token = window.gapi?.client?.getToken();
-    if(token) { window.google.accounts.oauth2.revoke(token.access_token); window.gapi.client.setToken(null); }
     setGcalConnected(false);
+    setGcalToken(null);
+    setGcalRefresh(null);
     setGcalEvents(null);
+    localStorage.removeItem("crm_gcalToken");
+    localStorage.removeItem("crm_gcalRefresh");
     localStorage.removeItem("crm_gcalEvents");
   };
 
