@@ -10,9 +10,7 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Google OAuth credentials not configured" });
   }
 
-  const host = process.env.VERCEL_URL
-    ? `https://${process.env.VERCEL_URL}`
-    : "http://localhost:3000";
+  const host = process.env.APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000");
 
   const redirectUri = `${host}/api/gcal/callback`;
 
