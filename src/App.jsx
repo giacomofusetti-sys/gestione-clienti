@@ -1016,8 +1016,25 @@ export default function CRMApp() {
   useEffect(()=>{ try { localStorage.setItem("crm_visitNotes",JSON.stringify(visitNotes)); } catch {} },[visitNotes]);
   useEffect(()=>{ try { localStorage.setItem("crm_emailAnalysis",JSON.stringify(emailAnalysis)); } catch {} },[emailAnalysis]);
 
+  // ─── SUPABASE NOTES SYNC ───
+  useEffect(()=>{
+    fetch("/api/notes")
+      .then(r=>{ if(!r.ok) throw new Error("Failed to load notes"); return r.json(); })
+      .then(rows=>{
+        const notes={};
+        rows.forEach(r=>{ notes[r.event_id]={ raw: r.raw_note||"", ai: r.ai_note||null }; });
+        setVisitNotes(prev=>({ ...prev, ...notes }));
+      })
+      .catch(()=>{/* fallback to localStorage, already loaded */});
+  },[]);
+
   const saveVisitNote = (eventId, raw, ai) => {
     setVisitNotes(prev => ({ ...prev, [eventId]: { raw, ai } }));
+    fetch("/api/notes",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({ event_id: eventId, raw_note: raw||null, ai_note: ai||null }),
+    }).catch(()=>{/* silent fail, localStorage is backup */});
   };
 
   // Map events to clients
