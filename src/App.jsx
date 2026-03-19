@@ -50,6 +50,23 @@ function classifyEventType(summary) {
   return "visita";
 }
 
+// Generic words to ignore when extracting significant company name keywords
+const GENERIC_COMPANY_WORDS = new Set([
+  "spa","srl","sas","snc","spa","sa","srl","ag","se","ltd","gmbh","inc","corp",
+  "s.p.a.","s.r.l.","s.a.s.","s.n.c.","s.a.",
+  "gruppo","group","energy","italia","italy","italian","international","europe","european",
+  "division","engineering","eng","technologies","technology","tech","costruzioni","constructions",
+  "products","sistemi","systems","industriale","industrial","produzione","water","hydrogen",
+]);
+
+function getClientKeywords(clientName) {
+  const words = clientName.toLowerCase()
+    .replace(/[^a-zàèéìòù0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(w => w.length > 1 && !GENERIC_COMPANY_WORDS.has(w));
+  return words;
+}
+
 function generateMatchKeys(summary, description) {
   const text = `${summary} ${description || ""}`.toLowerCase();
   const stopWords = new Set(["per","con","del","della","delle","dei","degli","dal","dalla","che","non","una","uno","gli","nel","nella","alle","alla","fissare","appuntamento","visita","chiamare","consegna","incontro","analisi","nuovo","nuova","riunione","meeting","evento"]);
@@ -181,13 +198,43 @@ function visitFrequency(score) {
 
 // Match calendar events to clients
 function matchEventToClient(event, clients) {
-  const keys = event.matchKeys;
+  const text = `${event.summary} ${event.notes || ""}`.toLowerCase();
+  let bestMatch = null;
+  let bestScore = 0;
+
   for (const c of clients) {
-    const nameLow = c.name.toLowerCase();
-    const contactLow = c.contact.toLowerCase();
-    if (keys.some(k => nameLow.includes(k) || contactLow.includes(k))) return c.id;
+    const keywords = getClientKeywords(c.name);
+    const contactWords = c.contact.toLowerCase()
+      .replace(/[^a-zàèéìòù\s]/g, " ")
+      .split(/\s+/)
+      .filter(w => w.length > 2);
+    let score = 0;
+    let matched = false;
+
+    // Check first significant keyword (most important — e.g. "MAINA", "COSTACURTA")
+    if (keywords.length > 0 && text.includes(keywords[0])) {
+      score += keywords[0].length * 10;
+      matched = true;
+      // Bonus for additional keywords matching
+      for (let i = 1; i < keywords.length; i++) {
+        if (text.includes(keywords[i])) score += keywords[i].length * 5;
+      }
+    }
+
+    // Check contact name match (surname or first name)
+    for (const w of contactWords) {
+      if (text.includes(w)) {
+        score += w.length * 3;
+        matched = true;
+      }
+    }
+
+    if (matched && score > bestScore) {
+      bestScore = score;
+      bestMatch = c.id;
+    }
   }
-  return null;
+  return bestMatch;
 }
 
 function clientScore(c) {
